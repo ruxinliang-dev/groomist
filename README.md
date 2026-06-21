@@ -3,7 +3,7 @@
 A lightweight shelf tool that turns a repeatable, studio-style **Ornatrix
 grooming pipeline** into one-click actions: build the distribution, stack the
 operators in the right order, keep a heavy groom fast in the viewport, rebuild
-clumps, and name the asset for handoff. Companion to Materialist.
+clumps, and name the asset for handoff. Companion to [Materialist](https://github.com/ruxinliang-dev/materialist).
 
 ![Groomist](screenshots/banner.png)
 
