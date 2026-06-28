@@ -366,9 +366,17 @@ def _source_meshes(hair):
     return list(shapes)
 
 
-def _stack_operators(op_logical):
+def _stack_operators(op_logical, hair=None):
     node_type = OP_TYPES.get(op_logical)
-    return cmds.ls(type=node_type) if node_type else []
+    if not node_type:
+        return []
+    if hair:
+        try:
+            stack = cmds.OxGetStackNodes(hair) or []
+        except Exception:
+            stack = cmds.listHistory(hair) or []
+        return [n for n in stack if cmds.nodeType(n) == node_type]
+    return cmds.ls(type=node_type) or []
 
 
 # ===========================================================================
@@ -462,9 +470,13 @@ def disable_heavy(*args):
 
 
 def _toggle_heavy(on):
+    hair = _current_hair()
+    if not hair:
+        _msg("Select a groom first.", ok=False)
+        return
     touched = 0
     for op in HEAVY_OPS:
-        for node in _stack_operators(op):
+        for node in _stack_operators(op, hair):
             _set_op_enabled(node, on)
             touched += 1
     _msg("{} {} heavy operator(s).".format("Enabled" if on else "Disabled", touched))
