@@ -407,7 +407,8 @@ def setup_strips(*args):
         cmds.select(hair, replace=True)
         # C1: GroundStrands (attrs unchecked) + ChangeWidth as the base.
         _add_operator("GroundStrands", enabled=True)
-        _add_operator("ChangeWidth", enabled=True)
+        change_width = _add_operator("ChangeWidth", enabled=True)
+        _set_change_width(change_width, CHANGE_WIDTH_DEFAULT)
         _msg("Hair-from-strips base created on {}.".format(mesh))
     else:
         _msg("Hair-from-strips creation failed.", ok=False)
