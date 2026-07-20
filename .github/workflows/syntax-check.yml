@@ -1,0 +1,31 @@
+name: Syntax check
+
+on:
+  push:
+    paths:
+      - "groomist.py"
+      - ".github/workflows/syntax-check.yml"
+  pull_request:
+    paths:
+      - "groomist.py"
+      - ".github/workflows/syntax-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  py-compile:
+    name: Compile with Python 3.7
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.7
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.7"
+
+      - name: Compile groomist.py
+        run: python -m py_compile groomist.py
