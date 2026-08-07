@@ -263,6 +263,44 @@ def _set_change_width(node, value):
     return None
 
 
+def _get_change_width(node):
+    """Read the base width off a ChangeWidth operator, or None. Mirrors the
+    attribute lookup in _set_change_width so a value survives a rebuild."""
+    if not node or not cmds.objExists(node):
+        return None
+    for attr in ("width", "value"):
+        if cmds.attributeQuery(attr, node=node, exists=True):
+            try:
+                return cmds.getAttr(node + "." + attr)
+            except Exception:
+                pass
+    for attr in (cmds.listAttr(node, settable=True) or []):
+        al = attr.lower()
+        if "width" in al and "ramp" not in al and "channel" not in al:
+            try:
+                return cmds.getAttr(node + "." + attr)
+            except Exception:
+                pass
+    return None
+
+
+def _delete_operator(node):
+    """Delete one Ornatrix stack operator and confirm that it is gone."""
+    if not node or not cmds.objExists(node):
+        return True
+    try:
+        mel.eval('OxDeleteStrandOperator "{}"'.format(node))
+    except Exception as exc:
+        cmds.warning("Could not delete operator {}: {}".format(node, exc))
+        return False
+    if cmds.objExists(node):
+        cmds.warning(
+            "Ornatrix reported no error, but {} still exists.".format(node)
+        )
+        return False
+    return True
+
+
 def _set_guide_length(hair, value):
     """Set guide length on the furball's GuidesFromMesh node. Returns attr or None."""
     if not hair:
@@ -435,22 +473,63 @@ def build_full_stack_disabled(*args):
         return
     cmds.select(hair, replace=True)
     try:
-        existing_cw = next((n for n in (cmds.OxGetStackNodes(hair) or [])
-                            if cmds.nodeType(n) == "ChangeWidthNode"), None)
-    except Exception:
-        existing_cw = None
+        stack_nodes = cmds.OxGetStackNodes(hair) or []
+    except Exception as exc:
+        cmds.warning(
+            "OxGetStackNodes failed for {}: {}. "
+            "Falling back to Maya history.".format(hair, exc)
+        )
+        try:
+            stack_nodes = cmds.listHistory(hair) or []
+        except Exception as history_exc:
+            _msg(
+                "Could not inspect the selected groom's stack: {}".format(
+                    history_exc
+                ),
+                ok=False,
+            )
+            return
+
+    existing_widths = [
+        node for node in stack_nodes
+        if cmds.objExists(node) and cmds.nodeType(node) == "ChangeWidthNode"
+    ]
+    if len(existing_widths) > 1:
+        _msg(
+            "Multiple Change Width operators already exist. "
+            "Resolve them before building the stack.",
+            ok=False,
+        )
+        return
+
+    existing_cw = existing_widths[0] if existing_widths else None
+    # Strips seed a ChangeWidth at creation time (setup_strips). Leaving it in
+    # place means the eight operators below chain in *above* it, so it no longer
+    # sits on top and the heavy ops evaluate after it and perturb strand radius.
+    # Carry its width over, remove it, and let the loop re-add it last.
+    seeded_width = None
+    if existing_cw:
+        seeded_width = _get_change_width(existing_cw)
+        if not _delete_operator(existing_cw):
+            _msg(
+                "Could not reposition the existing Change Width operator. "
+                "No new operators were added.",
+                ok=False,
+            )
+            return
+        # Deleting an operator can change Maya's current selection. Reselect the
+        # hair so the first new operator attaches to the correct stack.
+        cmds.select(hair, replace=True)
+    target_width = seeded_width if seeded_width is not None else CHANGE_WIDTH_DEFAULT
+
     built, disabled = [], []
     for op in STACK_ORDER:
-        # Strips already add a ChangeWidth; don't add a second - just set it low.
-        if op == "ChangeWidth" and existing_cw:
-            _set_change_width(existing_cw, CHANGE_WIDTH_DEFAULT)
-            continue
         on = op not in HEAVY_OPS
         node = _add_operator(op, enabled=on)
         if node:
             built.append(node)
             if op == "ChangeWidth":
-                _set_change_width(node, CHANGE_WIDTH_DEFAULT)
+                _set_change_width(node, target_width)
             if not on:
                 disabled.append(op)
     if not built:

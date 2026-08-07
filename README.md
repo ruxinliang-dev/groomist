@@ -58,6 +58,11 @@ heavy ones go on in pass-through. The final **Change Width** is set to a low
 default so strands render thin out of the box. Operators are added in evaluation
 order, so the stack reads broad-flow-first, render-tuning-last.
 
+On the **Hair from Mesh Strips** path, Setup already seeds a Change Width. Build
+Stack carries that operator's width value over, removes it, and re-adds Change
+Width last, so it lands on top on both paths. Width then stays put when you
+enable the heavy operators, which would otherwise evaluate after it.
+
 ### 3 · Performance
 - **Enable / Disable Heavy Operators** — toggles Clump, Curl, Frizz, Detail and
   Noise on or off in one click, using `OxEnableOperator` so the Ornatrix
