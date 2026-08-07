@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - "groomist.py"
+      - "tests/**"
       - ".github/workflows/syntax-check.yml"
   pull_request:
     paths:
       - "groomist.py"
+      - "tests/**"
       - ".github/workflows/syntax-check.yml"
 
 permissions:
@@ -29,3 +31,6 @@ jobs:
 
       - name: Compile groomist.py
         run: python -m py_compile groomist.py
+
+      - name: Run stack-build regression tests
+        run: python -m unittest discover -s tests -v

@@ -95,6 +95,11 @@ VIEWPORT_HIGH = 50
 # Low default strand width set on the ChangeWidth operator that Build Stack adds.
 CHANGE_WIDTH_DEFAULT = 0.05
 
+# Marks the ChangeWidth created and managed by Groomist. Build Stack only
+# replaces a marked node, so a user's custom ChangeWidth is never silently
+# deleted.
+GROOMIST_WIDTH_ATTR = "groomistManagedChangeWidth"
+
 # Low default guide length applied to a fresh furball (Ornatrix's own default is
 # long). Change this if furballs come out too short/long for your model scale.
 FURBALL_LENGTH_DEFAULT = 1.0
@@ -253,6 +258,8 @@ def _set_change_width(node, value):
             except Exception:
                 pass
     for attr in (cmds.listAttr(node, settable=True) or []):
+        if attr == GROOMIST_WIDTH_ATTR:
+            continue
         al = attr.lower()
         if "width" in al and "ramp" not in al and "channel" not in al:
             try:
@@ -275,6 +282,8 @@ def _get_change_width(node):
             except Exception:
                 pass
     for attr in (cmds.listAttr(node, settable=True) or []):
+        if attr == GROOMIST_WIDTH_ATTR:
+            continue
         al = attr.lower()
         if "width" in al and "ramp" not in al and "channel" not in al:
             try:
@@ -282,6 +291,38 @@ def _get_change_width(node):
             except Exception:
                 pass
     return None
+
+
+def _is_groomist_width(node):
+    """Return whether ``node`` is a ChangeWidth managed by Groomist."""
+    if not node or not cmds.objExists(node):
+        return False
+    try:
+        return (
+            cmds.attributeQuery(GROOMIST_WIDTH_ATTR, node=node, exists=True)
+            and bool(cmds.getAttr(node + "." + GROOMIST_WIDTH_ATTR))
+        )
+    except Exception:
+        return False
+
+
+def _mark_groomist_width(node):
+    """Mark a ChangeWidth as Groomist-managed. Returns whether it succeeded."""
+    if not node or not cmds.objExists(node):
+        return False
+    try:
+        if not cmds.attributeQuery(GROOMIST_WIDTH_ATTR, node=node, exists=True):
+            cmds.addAttr(
+                node,
+                longName=GROOMIST_WIDTH_ATTR,
+                attributeType="bool",
+                defaultValue=True,
+            )
+        cmds.setAttr(node + "." + GROOMIST_WIDTH_ATTR, True)
+        return True
+    except Exception as exc:
+        cmds.warning("Could not mark {} as Groomist-managed: {}".format(node, exc))
+        return False
 
 
 def _delete_operator(node):
@@ -299,6 +340,20 @@ def _delete_operator(node):
         )
         return False
     return True
+
+
+def _restore_change_width(hair, value, mark_managed=True):
+    """Re-add a ChangeWidth after a failed build and restore its base value."""
+    cmds.select(hair, replace=True)
+    node = _add_operator("ChangeWidth", enabled=True)
+    if not node:
+        return None
+    if not _set_change_width(node, value):
+        _delete_operator(node)
+        return None
+    if mark_managed:
+        _mark_groomist_width(node)
+    return node
 
 
 def _set_guide_length(hair, value):
@@ -455,6 +510,7 @@ def setup_strips(*args):
         _add_operator("GroundStrands", enabled=True)
         change_width = _add_operator("ChangeWidth", enabled=True)
         _set_change_width(change_width, CHANGE_WIDTH_DEFAULT)
+        _mark_groomist_width(change_width)
         _msg("Hair-from-strips base created on {}.".format(mesh))
     else:
         _msg("Hair-from-strips creation failed.", ok=False)
@@ -466,6 +522,14 @@ def build_full_stack_disabled(*args):
     Light, silhouette-defining operators (SurfaceComb, Rotate, Gravity) stay
     enabled; heavy ones (Clump, Curl, Frizz, Detail, Noise) are added disabled
     so the viewport stays fast. Enable them on demand below.
+
+    On a strips setup, the Groomist-managed ChangeWidth is removed and recreated
+    last so it becomes the top operator; its base width is preserved, but its
+    Maya node identity changes. The operation aborts before mutation if the stack
+    cannot be inspected, contains Build Stack operators already, contains more
+    than one ChangeWidth, contains a ChangeWidth not owned by Groomist, or cannot
+    read the original base width. If an operator fails to build, newly added
+    operators are rolled back and the original ChangeWidth is restored.
     """
     hair = _current_hair()
     if not hair:
@@ -490,19 +554,55 @@ def build_full_stack_disabled(*args):
             )
             return
 
+    typed_stack = []
+    try:
+        for node in stack_nodes:
+            if cmds.objExists(node):
+                typed_stack.append((node, cmds.nodeType(node)))
+    except Exception as exc:
+        _msg("Could not identify all operators in the selected stack: {}".format(exc),
+             ok=False)
+        return
+
     existing_widths = [
-        node for node in stack_nodes
-        if cmds.objExists(node) and cmds.nodeType(node) == "ChangeWidthNode"
+        node for node, node_type in typed_stack
+        if node_type == OP_TYPES["ChangeWidth"]
     ]
     if len(existing_widths) > 1:
         _msg(
-            "Multiple Change Width operators already exist. "
-            "Resolve them before building the stack.",
+            "Multiple Change Width operators were found: {}. "
+            "Groomist cannot safely choose one; keep one, then run Build Stack "
+            "again.".format(", ".join(existing_widths)),
+            ok=False,
+        )
+        return
+
+    build_node_types = {
+        OP_TYPES[op] for op in STACK_ORDER if op != "ChangeWidth"
+    }
+    existing_build_ops = [
+        node for node, node_type in typed_stack if node_type in build_node_types
+    ]
+    if existing_build_ops:
+        _msg(
+            "This groom already contains Build Stack operators: {}. "
+            "Build Stack was cancelled to avoid duplicates.".format(
+                ", ".join(existing_build_ops)
+            ),
             ok=False,
         )
         return
 
     existing_cw = existing_widths[0] if existing_widths else None
+    if existing_cw and not _is_groomist_width(existing_cw):
+        _msg(
+            "The existing Change Width ({}) is not managed by Groomist. "
+            "Build Stack was cancelled to preserve its settings and "
+            "connections.".format(existing_cw),
+            ok=False,
+        )
+        return
+
     # Strips seed a ChangeWidth at creation time (setup_strips). Leaving it in
     # place means the eight operators below chain in *above* it, so it no longer
     # sits on top and the heavy ops evaluate after it and perturb strand radius.
@@ -510,6 +610,13 @@ def build_full_stack_disabled(*args):
     seeded_width = None
     if existing_cw:
         seeded_width = _get_change_width(existing_cw)
+        if seeded_width is None:
+            _msg(
+                "Could not read the existing Change Width value. Build Stack "
+                "was cancelled before deleting it.",
+                ok=False,
+            )
+            return
         if not _delete_operator(existing_cw):
             _msg(
                 "Could not reposition the existing Change Width operator. "
@@ -523,18 +630,44 @@ def build_full_stack_disabled(*args):
     target_width = seeded_width if seeded_width is not None else CHANGE_WIDTH_DEFAULT
 
     built, disabled = [], []
+    failure = None
     for op in STACK_ORDER:
         on = op not in HEAVY_OPS
         node = _add_operator(op, enabled=on)
-        if node:
-            built.append(node)
-            if op == "ChangeWidth":
-                _set_change_width(node, target_width)
-            if not on:
-                disabled.append(op)
-    if not built:
-        _msg("No operators were added.", ok=False)
+        if not node:
+            failure = "Could not add {}.".format(op)
+            break
+        built.append(node)
+        if op == "ChangeWidth":
+            if not _set_change_width(node, target_width):
+                failure = "Could not set the rebuilt Change Width value."
+                break
+            _mark_groomist_width(node)
+        if not on:
+            disabled.append(op)
+
+    if failure:
+        rollback_failures = []
+        for node in reversed(built):
+            if not _delete_operator(node):
+                rollback_failures.append(node)
+
+        restored = None
+        if existing_cw:
+            restored = _restore_change_width(hair, target_width)
+
+        details = [failure]
+        if rollback_failures:
+            details.append(
+                "Could not roll back: {}.".format(", ".join(rollback_failures))
+            )
+        if existing_cw and not restored:
+            details.append("The original Change Width could not be restored.")
+        elif restored:
+            details.append("The original Change Width value was restored.")
+        _msg(" ".join(details), ok=False)
         return
+
     cmds.select(hair, replace=True)
     _msg("Built {} operators. Disabled for speed: {}.".format(
         len(built), ", ".join(disabled) if disabled else "none"))

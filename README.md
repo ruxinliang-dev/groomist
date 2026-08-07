@@ -63,6 +63,12 @@ Stack carries that operator's width value over, removes it, and re-adds Change
 Width last, so it lands on top on both paths. Width then stays put when you
 enable the heavy operators, which would otherwise evaluate after it.
 
+For safety, Groomist marks the Change Width it creates and will not replace an
+unmarked node. Build Stack also stops if it detects multiple Change Width nodes
+or an already-built operator stack. If an operator cannot be added, the new
+partial stack is rolled back and the original width is restored. It also stops
+before deletion if the existing width value cannot be read safely.
+
 ### 3 · Performance
 - **Enable / Disable Heavy Operators** — toggles Clump, Curl, Frizz, Detail and
   Noise on or off in one click, using `OxEnableOperator` so the Ornatrix
