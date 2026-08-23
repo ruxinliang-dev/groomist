@@ -122,8 +122,18 @@ def _disable_branch_mode():
 
 def _create_furball(mesh):
     """C1 section 2/4: grow strands from a scalp mesh. Returns the hair shape."""
+    before = set(cmds.ls(type="HairShape", long=True) or [])
     cmds.select(mesh, replace=True)
     hair = mel.eval("OxQuickHair")  # builds GuidesFromMesh->...->HairShape
+    if isinstance(hair, (list, tuple)):
+        hair = hair[0] if hair else None
+    if not hair:
+        # OxQuickHair may not return the new shape; resolve it from the new
+        # scene state (same approach as _create_strips).
+        new = [h for h in (cmds.ls(type="HairShape", long=True) or [])
+               if h not in before]
+        if new:
+            hair = new[0]
     return hair or None
 
 
