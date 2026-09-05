@@ -28,6 +28,8 @@ Author: Ruxin Liang  -  https://www.behance.net/ruxin-liang
 License: MIT
 """
 
+import contextlib
+
 import maya.cmds as cmds
 import maya.mel as mel
 
@@ -413,6 +415,31 @@ def _msg(text, ok=True):
         cmds.warning(text)
 
 
+@contextlib.contextmanager
+def _undo_chunk(name):
+    """Group the scene operations inside this block into a single undo step.
+
+    Falls through to a no-op when cmds.undoInfo is missing (e.g. the test
+    harness or non-Maya use), so calling code does not need to special-case.
+    Always closes the chunk on exit, including the exception path, so a
+    partial failure does not leak a half-opened chunk to the next call.
+    """
+    opened = False
+    try:
+        cmds.undoInfo(openChunk=True, chunkName=name)
+        opened = True
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        if opened:
+            try:
+                cmds.undoInfo(closeChunk=True)
+            except Exception:
+                pass
+
+
 def _repeatable(func):
     func()
     try:
@@ -490,10 +517,22 @@ def _stack_operators(op_logical, hair=None):
 # ===========================================================================
 
 def setup_furball(*args):
-    mesh = _selected_mesh()
-    if not mesh:
-        _msg("Select the Scalp_Geo mesh first.", ok=False)
-        return
+    with _undo_chunk("Groomist: setup furball"):
+        mesh = _selected_mesh()
+        if not mesh:
+            _msg("Select the Scalp_Geo mesh first.", ok=False)
+            return
+        if not _plugin_loaded():
+            _msg("Ornatrix plugin is not loaded.", ok=False)
+            return
+        hair = _create_furball(mesh)
+        if hair:
+            _ui["last_hair"] = hair
+            _remove_render_settings(hair)
+            _set_guide_length(hair, FURBALL_LENGTH_DEFAULT)
+            _msg("Fur Ball created on {} (length {}).".format(mesh, FURBALL_LENGTH_DEFAULT))
+        else:
+            _msg("Fur Ball creation failed.", ok=False)
     if not _plugin_loaded():
         _msg("Ornatrix plugin is not loaded.", ok=False)
         return
@@ -508,10 +547,26 @@ def setup_furball(*args):
 
 
 def setup_strips(*args):
-    mesh = _selected_mesh()
-    if not mesh:
-        _msg("Select the hair-strip geometry first.", ok=False)
-        return
+    with _undo_chunk("Groomist: setup strips"):
+        mesh = _selected_mesh()
+        if not mesh:
+            _msg("Select the hair-strip geometry first.", ok=False)
+            return
+        if not _plugin_loaded():
+            _msg("Ornatrix plugin is not loaded.", ok=False)
+            return
+        hair = _create_strips(mesh)
+        if hair:
+            _ui["last_hair"] = hair
+            cmds.select(hair, replace=True)
+            # C1: GroundStrands (attrs unchecked) + ChangeWidth as the base.
+            _add_operator("GroundStrands", enabled=True)
+            change_width = _add_operator("ChangeWidth", enabled=True)
+            _set_change_width(change_width, CHANGE_WIDTH_DEFAULT)
+            _mark_groomist_width(change_width)
+            _msg("Hair-from-strips base created on {}.".format(mesh))
+        else:
+            _msg("Hair-from-strips creation failed.", ok=False)
     if not _plugin_loaded():
         _msg("Ornatrix plugin is not loaded.", ok=False)
         return
@@ -544,146 +599,147 @@ def build_full_stack_disabled(*args):
     read the original base width. If an operator fails to build, newly added
     operators are rolled back and the original ChangeWidth is restored.
     """
-    hair = _current_hair()
-    if not hair:
-        _msg("Create or select a hair object first (use Setup).", ok=False)
-        return
-    cmds.select(hair, replace=True)
-    try:
-        stack_nodes = cmds.OxGetStackNodes(hair) or []
-    except Exception as exc:
-        cmds.warning(
-            "OxGetStackNodes failed for {}: {}. "
-            "Falling back to Maya history.".format(hair, exc)
-        )
+    with _undo_chunk("Groomist: build stack"):
+        hair = _current_hair()
+        if not hair:
+            _msg("Create or select a hair object first (use Setup).", ok=False)
+            return
+        cmds.select(hair, replace=True)
         try:
-            stack_nodes = cmds.listHistory(hair) or []
-        except Exception as history_exc:
+            stack_nodes = cmds.OxGetStackNodes(hair) or []
+        except Exception as exc:
+            cmds.warning(
+                "OxGetStackNodes failed for {}: {}. "
+                "Falling back to Maya history.".format(hair, exc)
+            )
+            try:
+                stack_nodes = cmds.listHistory(hair) or []
+            except Exception as history_exc:
+                _msg(
+                    "Could not inspect the selected groom's stack: {}".format(
+                        history_exc
+                    ),
+                    ok=False,
+                )
+                return
+
+        typed_stack = []
+        try:
+            for node in stack_nodes:
+                if cmds.objExists(node):
+                    typed_stack.append((node, cmds.nodeType(node)))
+        except Exception as exc:
+            _msg("Could not identify all operators in the selected stack: {}".format(exc),
+                 ok=False)
+            return
+
+        existing_widths = [
+            node for node, node_type in typed_stack
+            if node_type == OP_TYPES["ChangeWidth"]
+        ]
+        if len(existing_widths) > 1:
             _msg(
-                "Could not inspect the selected groom's stack: {}".format(
-                    history_exc
+                "Multiple Change Width operators were found: {}. "
+                "Groomist cannot safely choose one; keep one, then run Build Stack "
+                "again.".format(", ".join(existing_widths)),
+                ok=False,
+            )
+            return
+
+        build_node_types = {
+            OP_TYPES[op] for op in STACK_ORDER if op != "ChangeWidth"
+        }
+        existing_build_ops = [
+            node for node, node_type in typed_stack if node_type in build_node_types
+        ]
+        if existing_build_ops:
+            _msg(
+                "This groom already contains Build Stack operators: {}. "
+                "Build Stack was cancelled to avoid duplicates.".format(
+                    ", ".join(existing_build_ops)
                 ),
                 ok=False,
             )
             return
 
-    typed_stack = []
-    try:
-        for node in stack_nodes:
-            if cmds.objExists(node):
-                typed_stack.append((node, cmds.nodeType(node)))
-    except Exception as exc:
-        _msg("Could not identify all operators in the selected stack: {}".format(exc),
-             ok=False)
-        return
-
-    existing_widths = [
-        node for node, node_type in typed_stack
-        if node_type == OP_TYPES["ChangeWidth"]
-    ]
-    if len(existing_widths) > 1:
-        _msg(
-            "Multiple Change Width operators were found: {}. "
-            "Groomist cannot safely choose one; keep one, then run Build Stack "
-            "again.".format(", ".join(existing_widths)),
-            ok=False,
-        )
-        return
-
-    build_node_types = {
-        OP_TYPES[op] for op in STACK_ORDER if op != "ChangeWidth"
-    }
-    existing_build_ops = [
-        node for node, node_type in typed_stack if node_type in build_node_types
-    ]
-    if existing_build_ops:
-        _msg(
-            "This groom already contains Build Stack operators: {}. "
-            "Build Stack was cancelled to avoid duplicates.".format(
-                ", ".join(existing_build_ops)
-            ),
-            ok=False,
-        )
-        return
-
-    existing_cw = existing_widths[0] if existing_widths else None
-    if existing_cw and not _is_groomist_width(existing_cw):
-        _msg(
-            "The existing Change Width ({}) is not managed by Groomist. "
-            "Build Stack was cancelled to preserve its settings and "
-            "connections.".format(existing_cw),
-            ok=False,
-        )
-        return
-
-    # Strips seed a ChangeWidth at creation time (setup_strips). Leaving it in
-    # place means the eight operators below chain in *above* it, so it no longer
-    # sits on top and the heavy ops evaluate after it and perturb strand radius.
-    # Carry its width over, remove it, and let the loop re-add it last.
-    seeded_width = None
-    if existing_cw:
-        seeded_width = _get_change_width(existing_cw)
-        if seeded_width is None:
+        existing_cw = existing_widths[0] if existing_widths else None
+        if existing_cw and not _is_groomist_width(existing_cw):
             _msg(
-                "Could not read the existing Change Width value. Build Stack "
-                "was cancelled before deleting it.",
+                "The existing Change Width ({}) is not managed by Groomist. "
+                "Build Stack was cancelled to preserve its settings and "
+                "connections.".format(existing_cw),
                 ok=False,
             )
             return
-        if not _delete_operator(existing_cw):
-            _msg(
-                "Could not reposition the existing Change Width operator. "
-                "No new operators were added.",
-                ok=False,
-            )
-            return
-        # Deleting an operator can change Maya's current selection. Reselect the
-        # hair so the first new operator attaches to the correct stack.
-        cmds.select(hair, replace=True)
-    target_width = seeded_width if seeded_width is not None else CHANGE_WIDTH_DEFAULT
 
-    built, disabled = [], []
-    failure = None
-    for op in STACK_ORDER:
-        on = op not in HEAVY_OPS
-        node = _add_operator(op, enabled=on)
-        if not node:
-            failure = "Could not add {}.".format(op)
-            break
-        built.append(node)
-        if op == "ChangeWidth":
-            if not _set_change_width(node, target_width):
-                failure = "Could not set the rebuilt Change Width value."
-                break
-            _mark_groomist_width(node)
-        if not on:
-            disabled.append(op)
-
-    if failure:
-        rollback_failures = []
-        for node in reversed(built):
-            if not _delete_operator(node):
-                rollback_failures.append(node)
-
-        restored = None
+        # Strips seed a ChangeWidth at creation time (setup_strips). Leaving it in
+        # place means the eight operators below chain in *above* it, so it no longer
+        # sits on top and the heavy ops evaluate after it and perturb strand radius.
+        # Carry its width over, remove it, and let the loop re-add it last.
+        seeded_width = None
         if existing_cw:
-            restored = _restore_change_width(hair, target_width)
+            seeded_width = _get_change_width(existing_cw)
+            if seeded_width is None:
+                _msg(
+                    "Could not read the existing Change Width value. Build Stack "
+                    "was cancelled before deleting it.",
+                    ok=False,
+                )
+                return
+            if not _delete_operator(existing_cw):
+                _msg(
+                    "Could not reposition the existing Change Width operator. "
+                    "No new operators were added.",
+                    ok=False,
+                )
+                return
+            # Deleting an operator can change Maya's current selection. Reselect the
+            # hair so the first new operator attaches to the correct stack.
+            cmds.select(hair, replace=True)
+        target_width = seeded_width if seeded_width is not None else CHANGE_WIDTH_DEFAULT
 
-        details = [failure]
-        if rollback_failures:
-            details.append(
-                "Could not roll back: {}.".format(", ".join(rollback_failures))
-            )
-        if existing_cw and not restored:
-            details.append("The original Change Width could not be restored.")
-        elif restored:
-            details.append("The original Change Width value was restored.")
-        _msg(" ".join(details), ok=False)
-        return
+        built, disabled = [], []
+        failure = None
+        for op in STACK_ORDER:
+            on = op not in HEAVY_OPS
+            node = _add_operator(op, enabled=on)
+            if not node:
+                failure = "Could not add {}.".format(op)
+                break
+            built.append(node)
+            if op == "ChangeWidth":
+                if not _set_change_width(node, target_width):
+                    failure = "Could not set the rebuilt Change Width value."
+                    break
+                _mark_groomist_width(node)
+            if not on:
+                disabled.append(op)
 
-    cmds.select(hair, replace=True)
-    _msg("Built {} operators. Disabled for speed: {}.".format(
-        len(built), ", ".join(disabled) if disabled else "none"))
+        if failure:
+            rollback_failures = []
+            for node in reversed(built):
+                if not _delete_operator(node):
+                    rollback_failures.append(node)
+
+            restored = None
+            if existing_cw:
+                restored = _restore_change_width(hair, target_width)
+
+            details = [failure]
+            if rollback_failures:
+                details.append(
+                    "Could not roll back: {}.".format(", ".join(rollback_failures))
+                )
+            if existing_cw and not restored:
+                details.append("The original Change Width could not be restored.")
+            elif restored:
+                details.append("The original Change Width value was restored.")
+            _msg(" ".join(details), ok=False)
+            return
+
+        cmds.select(hair, replace=True)
+        _msg("Built {} operators. Disabled for speed: {}.".format(
+            len(built), ", ".join(disabled) if disabled else "none"))
 
 
 def enable_heavy(*args):
@@ -743,37 +799,38 @@ def recreate_clumps(*args):
     for clumps that go buggy after an upstream change). Mirrors the Clump
     operator's Delete + Create Clump(s) buttons, and leaves the Clump node(s)
     selected afterwards (OxEditClumps otherwise selects the distribution mesh)."""
-    sel = cmds.ls(selection=True, long=True) or []
-    clumps = [n for n in sel if cmds.nodeType(n) == "ClumpNode"]
-    if not clumps:
-        hair = _current_hair()
-        stack = []
-        if hair:
+    with _undo_chunk("Groomist: recreate clumps"):
+        sel = cmds.ls(selection=True, long=True) or []
+        clumps = [n for n in sel if cmds.nodeType(n) == "ClumpNode"]
+        if not clumps:
+            hair = _current_hair()
+            stack = []
+            if hair:
+                try:
+                    stack = cmds.OxGetStackNodes(hair) or []
+                except Exception:
+                    stack = []
+            clumps = [n for n in stack if cmds.nodeType(n) == "ClumpNode"]
+        if not clumps:
+            _msg("Select a Clump operator (or a groom that has one).", ok=False)
+            return
+        cmds.select(clear=True)  # empty selection -> OxEditClumps acts on ALL clumps
+        done = 0
+        for c in clumps:
             try:
-                stack = cmds.OxGetStackNodes(hair) or []
-            except Exception:
-                stack = []
-        clumps = [n for n in stack if cmds.nodeType(n) == "ClumpNode"]
-    if not clumps:
-        _msg("Select a Clump operator (or a groom that has one).", ok=False)
-        return
-    cmds.select(clear=True)  # empty selection -> OxEditClumps acts on ALL clumps
-    done = 0
-    for c in clumps:
-        try:
-            method = cmds.getAttr(c + ".clumpCreateMethod")
-            count = cmds.getAttr(c + ".clumpCount")
-            seed = cmds.getAttr(c + ".randomSeed")
-            mel.eval('OxEditClumps "{}" -d'.format(c))
-            mel.eval('OxEditClumps "{}" -c {} {} {}'.format(c, method, count, seed))
-            done += 1
-        except Exception as exc:
-            cmds.warning("Recreate clumps failed on {}: {}".format(c, exc))
-    # Restore selection to the Clump node(s) so editing can continue on them.
-    existing = [c for c in clumps if cmds.objExists(c)]
-    if existing:
-        cmds.select(existing, replace=True)
-    _msg("Recreated clumps on {} operator(s).".format(done))
+                method = cmds.getAttr(c + ".clumpCreateMethod")
+                count = cmds.getAttr(c + ".clumpCount")
+                seed = cmds.getAttr(c + ".randomSeed")
+                mel.eval('OxEditClumps "{}" -d'.format(c))
+                mel.eval('OxEditClumps "{}" -c {} {} {}'.format(c, method, count, seed))
+                done += 1
+            except Exception as exc:
+                cmds.warning("Recreate clumps failed on {}: {}".format(c, exc))
+        # Restore selection to the Clump node(s) so editing can continue on them.
+        existing = [c for c in clumps if cmds.objExists(c)]
+        if existing:
+            cmds.select(existing, replace=True)
+        _msg("Recreated clumps on {} operator(s).".format(done))
 
 
 def rename_hair(*args):

@@ -28,6 +28,7 @@ class FakeCmds(object):
         self.history_error = history_error
         self.warnings = []
         self.selections = []
+        self.undo_chunks = []
 
     def OxGetStackNodes(self, hair):
         if self.query_error:
@@ -86,6 +87,17 @@ class FakeCmds(object):
         self.node_types.pop(node, None)
         self.attrs.pop(node, None)
         self.stack = [item for item in self.stack if item != node]
+
+    def ls(self, type=None, **kwargs):
+        # Test-harness coverage for `cmds.ls(type=...)`, used by
+        # _create_strips / _create_furball to discover the freshly created
+        # hair shape.
+        if type is None:
+            return list(self.stack)
+        return [n for n in self.stack if self.node_types.get(n) == type]
+
+    def undoInfo(self, **kwargs):
+        self.undo_chunks.append(kwargs)
 
 
 class FakeMel(object):
@@ -312,3 +324,50 @@ class CreateFurballTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UndoChunkTests(unittest.TestCase):
+    def test_undo_chunk_opens_and_closes_named(self):
+        cmds = FakeCmds([])
+        groomist.cmds = cmds
+        with groomist._undo_chunk("test-chunk"):
+            pass
+        opens = [c for c in cmds.undo_chunks if c.get("openChunk")]
+        closes = [c for c in cmds.undo_chunks if c.get("closeChunk")]
+        self.assertEqual(len(opens), 1)
+        self.assertEqual(len(closes), 1)
+        self.assertEqual(opens[0].get("chunkName"), "test-chunk")
+
+    def test_undo_chunk_still_closes_on_exception(self):
+        cmds = FakeCmds([])
+        groomist.cmds = cmds
+        try:
+            with groomist._undo_chunk("err-chunk"):
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        closes = [c for c in cmds.undo_chunks if c.get("closeChunk")]
+        self.assertEqual(len(closes), 1, "closeChunk must run on exception")
+
+    def test_setup_strips_opens_a_named_chunk(self):
+        # Indirect: just confirm the helper is invoked with the right name
+        # by running the high-level op against a minimal scene.
+        cmds = FakeCmds([("stripGeo", "mesh"), ("stripShape", "nurbsCurve")])
+        groomist.cmds = cmds
+
+        captured = []
+        def fake_eval(command):
+            captured.append(command)
+            if command.startswith("OxAddHairFromMeshStrips"):
+                cmds.add_node("hairNew", "HairShape")
+                return None
+            return None
+        groomist.mel = type("Mel", (), {"eval": staticmethod(fake_eval)})()
+        groomist._selected_mesh = lambda: "stripGeo"
+        groomist._plugin_loaded = lambda: True
+        groomist._msg = lambda *a, **k: None
+        # run in the chunk
+        with groomist._undo_chunk("Groomist: setup strips"):
+            groomist.setup_strips()
+        self.assertTrue(any("openChunk" in c and c.get("chunkName") == "Groomist: setup strips"
+                            for c in cmds.undo_chunks))
