@@ -48,7 +48,10 @@ class FakeCmds(object):
     def select(self, nodes, replace=True):
         self.selections.append(nodes)
 
-    def ls(self, type=None, long=False, **kwargs):
+    def ls(self, type=None, long=False, selection=False, **kwargs):
+        if selection:
+            last = self.selections[-1] if self.selections else []
+            return list(last) if isinstance(last, (list, tuple)) else [last]
         if type is None:
             return list(self.stack)
         return [n for n in self.stack if self.node_types.get(n) == type]
@@ -237,10 +240,6 @@ class StackBuildTests(unittest.TestCase):
         self.assertIn("was restored", messages[-1][0])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CreateFurballTests(unittest.TestCase):
     def test_falls_back_to_scene_diff_when_oxquickhair_returns_none(self):
         cmds = FakeCmds([("scalpShape", "mesh")])
@@ -277,3 +276,39 @@ class CreateFurballTests(unittest.TestCase):
         groomist.mel = ReturningMel(cmds)
         hair = groomist._create_furball("scalp")
         self.assertEqual(hair, "returnedShape")
+
+    def test_ignores_a_non_hairshape_return_value(self):
+        cmds = FakeCmds([("scalpShape", "mesh")])
+        groomist.cmds = cmds
+
+        class GuidesReturnMel(object):
+            """OxQuickHair hands back the guides node instead of the shape."""
+
+            def __init__(self, cmds):
+                self.cmds = cmds
+
+            def eval(self, command):
+                assert command == "OxQuickHair"
+                self.cmds.add_node("guidesFromMesh1", "GuidesFromMeshNode")
+                self.cmds.add_node("newHairShape", "HairShape")
+                return "guidesFromMesh1"
+
+        groomist.mel = GuidesReturnMel(cmds)
+        hair = groomist._create_furball("scalpShape")
+        self.assertEqual(hair, "newHairShape")
+
+    def test_mel_failure_warns_instead_of_propagating(self):
+        cmds = FakeCmds([("scalpShape", "mesh")])
+        groomist.cmds = cmds
+
+        class RaisingMel(object):
+            def eval(self, command):
+                raise RuntimeError("OxQuickHair blew up")
+
+        groomist.mel = RaisingMel()
+        self.assertIsNone(groomist._create_furball("scalpShape"))
+        self.assertTrue(cmds.warnings)
+
+
+if __name__ == "__main__":
+    unittest.main()

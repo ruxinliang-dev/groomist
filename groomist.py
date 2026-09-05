@@ -124,16 +124,19 @@ def _create_furball(mesh):
     """C1 section 2/4: grow strands from a scalp mesh. Returns the hair shape."""
     before = set(cmds.ls(type="HairShape", long=True) or [])
     cmds.select(mesh, replace=True)
-    hair = mel.eval("OxQuickHair")  # builds GuidesFromMesh->...->HairShape
+    try:
+        hair = mel.eval("OxQuickHair")  # builds GuidesFromMesh->...->HairShape
+    except Exception as exc:
+        cmds.warning("OxQuickHair failed: {}".format(exc))
+        hair = None
+    # The proc may not return the shape, so resolve it from the new scene state
+    # first: cmds.ls is type-filtered and cannot hand back a non-HairShape,
+    # while the return value is whatever the proc happened to put first.
+    new = [h for h in (cmds.ls(type="HairShape", long=True) or []) if h not in before]
+    if new:
+        return new[0]
     if isinstance(hair, (list, tuple)):
         hair = hair[0] if hair else None
-    if not hair:
-        # OxQuickHair may not return the new shape; resolve it from the new
-        # scene state (same approach as _create_strips).
-        new = [h for h in (cmds.ls(type="HairShape", long=True) or [])
-               if h not in before]
-        if new:
-            hair = new[0]
     return hair or None
 
 
