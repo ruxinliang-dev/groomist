@@ -48,6 +48,11 @@ class FakeCmds(object):
     def select(self, nodes, replace=True):
         self.selections.append(nodes)
 
+    def ls(self, type=None, long=False, **kwargs):
+        if type is None:
+            return list(self.stack)
+        return [n for n in self.stack if self.node_types.get(n) == type]
+
     def warning(self, message):
         self.warnings.append(message)
 
@@ -234,3 +239,41 @@ class StackBuildTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CreateFurballTests(unittest.TestCase):
+    def test_falls_back_to_scene_diff_when_oxquickhair_returns_none(self):
+        cmds = FakeCmds([("scalpShape", "mesh")])
+        groomist.cmds = cmds
+
+        class NullReturnMel(object):
+            """OxQuickHair creates the hair but returns nothing."""
+
+            def __init__(self, cmds):
+                self.cmds = cmds
+
+            def eval(self, command):
+                assert command == "OxQuickHair"
+                self.cmds.add_node("newHairShape", "HairShape")
+                return None
+
+        groomist.mel = NullReturnMel(cmds)
+        hair = groomist._create_furball("scalp")
+        self.assertEqual(hair, "newHairShape")
+
+    def test_prefers_mel_return_value_when_present(self):
+        cmds = FakeCmds([("scalpShape", "mesh")])
+        groomist.cmds = cmds
+
+        class ReturningMel(object):
+            def __init__(self, cmds):
+                self.cmds = cmds
+
+            def eval(self, command):
+                assert command == "OxQuickHair"
+                self.cmds.add_node("returnedShape", "HairShape")
+                return "returnedShape"
+
+        groomist.mel = ReturningMel(cmds)
+        hair = groomist._create_furball("scalp")
+        self.assertEqual(hair, "returnedShape")
