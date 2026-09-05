@@ -322,10 +322,6 @@ class CreateFurballTests(unittest.TestCase):
         self.assertTrue(cmds.warnings)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class UndoChunkTests(unittest.TestCase):
     def test_undo_chunk_opens_and_closes_named(self):
         cmds = FakeCmds([])
@@ -349,25 +345,65 @@ class UndoChunkTests(unittest.TestCase):
         closes = [c for c in cmds.undo_chunks if c.get("closeChunk")]
         self.assertEqual(len(closes), 1, "closeChunk must run on exception")
 
-    def test_setup_strips_opens_a_named_chunk(self):
-        # Indirect: just confirm the helper is invoked with the right name
-        # by running the high-level op against a minimal scene.
+    def _patch(self, name, value):
+        """Swap a module global for the duration of one test."""
+        original = getattr(groomist, name)
+        self.addCleanup(setattr, groomist, name, original)
+        setattr(groomist, name, value)
+
+    def test_setup_strips_opens_one_chunk_and_builds_once(self):
         cmds = FakeCmds([("stripGeo", "mesh"), ("stripShape", "nurbsCurve")])
         groomist.cmds = cmds
 
-        captured = []
-        def fake_eval(command):
-            captured.append(command)
-            if command.startswith("OxAddHairFromMeshStrips"):
-                cmds.add_node("hairNew", "HairShape")
-                return None
-            return None
-        groomist.mel = type("Mel", (), {"eval": staticmethod(fake_eval)})()
-        groomist._selected_mesh = lambda: "stripGeo"
-        groomist._plugin_loaded = lambda: True
-        groomist._msg = lambda *a, **k: None
-        # run in the chunk
-        with groomist._undo_chunk("Groomist: setup strips"):
-            groomist.setup_strips()
-        self.assertTrue(any("openChunk" in c and c.get("chunkName") == "Groomist: setup strips"
-                            for c in cmds.undo_chunks))
+        built = []
+
+        def fake_create_strips(mesh):
+            built.append(mesh)
+            cmds.add_node("hairNew", "HairShape")
+            return "hairNew"
+
+        self._patch("_selected_mesh", lambda: "stripGeo")
+        self._patch("_plugin_loaded", lambda: True)
+        self._patch("_msg", lambda *a, **k: None)
+        self._patch("_create_strips", fake_create_strips)
+        self._patch("_add_operator", lambda op, enabled=True: op)
+        self._patch("_set_change_width", lambda node, width: None)
+        self._patch("_mark_groomist_width", lambda node: None)
+
+        groomist.setup_strips()
+
+        opens = [c for c in cmds.undo_chunks if c.get("openChunk")]
+        closes = [c for c in cmds.undo_chunks if c.get("closeChunk")]
+        self.assertEqual(len(opens), 1)
+        self.assertEqual(opens[0].get("chunkName"), "Groomist: setup strips")
+        self.assertEqual(len(closes), 1)
+        # The build must happen once, inside that chunk.
+        self.assertEqual(built, ["stripGeo"])
+
+    def test_setup_furball_builds_once_inside_the_chunk(self):
+        cmds = FakeCmds([("scalpShape", "mesh")])
+        groomist.cmds = cmds
+
+        built = []
+
+        def fake_create_furball(mesh):
+            built.append(mesh)
+            cmds.add_node("furHair", "HairShape")
+            return "furHair"
+
+        self._patch("_selected_mesh", lambda: "Scalp_Geo")
+        self._patch("_plugin_loaded", lambda: True)
+        self._patch("_msg", lambda *a, **k: None)
+        self._patch("_create_furball", fake_create_furball)
+        self._patch("_remove_render_settings", lambda hair: None)
+        self._patch("_set_guide_length", lambda hair, value: None)
+
+        groomist.setup_furball()
+
+        self.assertEqual(built, ["Scalp_Geo"])
+        self.assertEqual(groomist._ui.get("last_hair"), "furHair")
+        self.assertEqual(len([c for c in cmds.undo_chunks if c.get("openChunk")]), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

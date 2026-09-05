@@ -533,17 +533,6 @@ def setup_furball(*args):
             _msg("Fur Ball created on {} (length {}).".format(mesh, FURBALL_LENGTH_DEFAULT))
         else:
             _msg("Fur Ball creation failed.", ok=False)
-    if not _plugin_loaded():
-        _msg("Ornatrix plugin is not loaded.", ok=False)
-        return
-    hair = _create_furball(mesh)
-    if hair:
-        _ui["last_hair"] = hair
-        _remove_render_settings(hair)
-        _set_guide_length(hair, FURBALL_LENGTH_DEFAULT)
-        _msg("Fur Ball created on {} (length {}).".format(mesh, FURBALL_LENGTH_DEFAULT))
-    else:
-        _msg("Fur Ball creation failed.", ok=False)
 
 
 def setup_strips(*args):
@@ -567,21 +556,6 @@ def setup_strips(*args):
             _msg("Hair-from-strips base created on {}.".format(mesh))
         else:
             _msg("Hair-from-strips creation failed.", ok=False)
-    if not _plugin_loaded():
-        _msg("Ornatrix plugin is not loaded.", ok=False)
-        return
-    hair = _create_strips(mesh)
-    if hair:
-        _ui["last_hair"] = hair
-        cmds.select(hair, replace=True)
-        # C1: GroundStrands (attrs unchecked) + ChangeWidth as the base.
-        _add_operator("GroundStrands", enabled=True)
-        change_width = _add_operator("ChangeWidth", enabled=True)
-        _set_change_width(change_width, CHANGE_WIDTH_DEFAULT)
-        _mark_groomist_width(change_width)
-        _msg("Hair-from-strips base created on {}.".format(mesh))
-    else:
-        _msg("Hair-from-strips creation failed.", ok=False)
 
 
 def build_full_stack_disabled(*args):
